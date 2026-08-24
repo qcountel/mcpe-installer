@@ -1,0 +1,8 @@
+// app.rc
+#include <windows.h>
+
+1 RT_MANIFEST "app.manifest"
+
+// Иконка приложения
+IDI_ICON1 ICON "anx1ous.ico"
+1         ICON "anx1ous.ico"
