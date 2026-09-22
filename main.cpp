@@ -24,7 +24,6 @@
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <urlmon.h>
-#include <wininet.h>
 #include <wincrypt.h>
 #include <appmodel.h>
 #include <shobjidl.h>
@@ -40,7 +39,6 @@
 using namespace Gdiplus;
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "urlmon.lib")
-#pragma comment(lib, "wininet.lib")
 
 #ifndef DWMWA_WINDOW_CORNER_PREFERENCE
 #  define DWMWA_WINDOW_CORNER_PREFERENCE 33
@@ -58,9 +56,7 @@ static const int WIN_H = 220;
 // the Store's Microsoft.MinecraftUWP. That is what lets it live next to a modern
 // Minecraft: different Identity Name, different publisher hash, separate data
 // folder. Installing it therefore never touches the Store copy.
-static const wchar_t* MC_PACKAGE = L"Microsoft.Minecraft115";
 static const wchar_t* MC_FAMILY  = L"Microsoft.Minecraft115_ekx664bjj63nr";
-static const wchar_t* MC_AUMID   = L"Microsoft.Minecraft115_ekx664bjj63nr!App";
 static const wchar_t* URL_APPX =
     L"https://github.com/qcountel/anx1ous/releases/download/minecraft/mcpe.appx";
 static const wchar_t* URL_CERT =
@@ -138,49 +134,6 @@ static bool RunHidden(const wchar_t* args, DWORD timeoutMs, DWORD* exitCode) {
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
     return wait == WAIT_OBJECT_0;
-}
-
-static bool RunCapture(const wchar_t* args, wchar_t* out, size_t outChars, DWORD timeoutMs) {
-    if (out && outChars) out[0] = 0;
-
-    SECURITY_ATTRIBUTES sa{ sizeof(sa), nullptr, TRUE };
-    HANDLE rd = nullptr, wr = nullptr;
-    if (!CreatePipe(&rd, &wr, &sa, 0)) return false;
-    SetHandleInformation(rd, HANDLE_FLAG_INHERIT, 0);
-
-    wchar_t cmd[2048];
-    swprintf(cmd, 2048, L"powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass %ls",
-             args);
-
-    STARTUPINFOW si{ sizeof(si) };
-    si.dwFlags     = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    si.hStdOutput  = wr;
-    si.hStdError   = wr;
-    PROCESS_INFORMATION pi{};
-
-    if (!CreateProcessW(nullptr, cmd, nullptr, nullptr, TRUE,
-                        CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-        CloseHandle(rd); CloseHandle(wr);
-        return false;
-    }
-    CloseHandle(wr);   // the child owns the write end now
-
-    char buf[1024] = {};
-    DWORD total = 0, got = 0;
-    while (total < sizeof(buf) - 1 &&
-           ReadFile(rd, buf + total, (DWORD)(sizeof(buf) - 1 - total), &got, nullptr) && got)
-        total += got;
-    buf[total] = 0;
-
-    WaitForSingleObject(pi.hProcess, timeoutMs);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    CloseHandle(rd);
-
-    if (out && outChars)
-        MultiByteToWideChar(CP_UTF8, 0, buf, -1, out, (int)outChars);
-    return true;
 }
 
 // ── Minecraft 1.1.5 detection ─────────────────────────────────────────────────
@@ -344,75 +297,6 @@ static bool InstallMinecraft() {
         return false;
     }
     return true;
-}
-
-// ── Resolve latest DLL URL from GitHub ────────────────────────────────────────
-// Reads a URL into memory. Used for the releases API, which is small JSON.
-static bool HttpGetText(const wchar_t* url, char* out, DWORD outBytes) {
-    if (!out || outBytes == 0) return false;
-    out[0] = 0;
-
-    HINTERNET inet = InternetOpenW(L"anx1ous-launcher/1.0",
-                                   INTERNET_OPEN_TYPE_PRECONFIG, nullptr, nullptr, 0);
-    if (!inet) return false;
-
-    HINTERNET conn = InternetOpenUrlW(inet, url, nullptr, 0,
-                                      INTERNET_FLAG_RELOAD|INTERNET_FLAG_SECURE|
-                                      INTERNET_FLAG_NO_CACHE_WRITE|INTERNET_FLAG_NO_UI, 0);
-    if (!conn) { InternetCloseHandle(inet); return false; }
-
-    DWORD total = 0, got = 0;
-    while (total < outBytes - 1 &&
-           InternetReadFile(conn, out + total, outBytes - 1 - total, &got) && got)
-        total += got;
-    out[total] = 0;
-
-    InternetCloseHandle(conn);
-    InternetCloseHandle(inet);
-    return total > 0;
-}
-
-// Finds the newest release that actually ships anx1ous.dll.
-//
-// "latest" cannot be trusted: GitHub picks it by publish date across all
-// releases, so an unrelated release (the Minecraft package, say) becomes latest
-// and the download 404s. Walk the release list in order instead — the API already
-// returns newest first — and take the first asset named anx1ous.dll.
-static void FetchLatestDllUrl(wchar_t* outUrl, DWORD outLen) {
-    static char json[262144];
-
-    if (HttpGetText(L"https://api.github.com/repos/qcountel/anx1ous/releases?per_page=30",
-                    json, sizeof(json))) {
-        const char* needle = "\"browser_download_url\"";
-        for (const char* p = strstr(json, needle); p; p = strstr(p + 1, needle)) {
-            const char* colon = strchr(p, ':');
-            if (!colon) break;
-            const char* open = strchr(colon, '"');
-            if (!open) break;
-            const char* close = strchr(open + 1, '"');
-            if (!close) break;
-
-            const size_t len = (size_t)(close - open - 1);
-            if (len == 0 || len >= 512) continue;
-
-            char url[512];
-            memcpy(url, open + 1, len);
-            url[len] = 0;
-
-            // Assets keep their upload name, so the suffix identifies the DLL.
-            const size_t urlLen = strlen(url);
-            const char* suffix = "/anx1ous.dll";
-            const size_t suffixLen = strlen(suffix);
-            if (urlLen >= suffixLen && _stricmp(url + urlLen - suffixLen, suffix) == 0) {
-                MultiByteToWideChar(CP_UTF8, 0, url, -1, outUrl, (int)outLen);
-                return;
-            }
-        }
-    }
-
-    // Offline or the API refused us: the redirect endpoint is still worth a try.
-    swprintf(outUrl,
-        L"https://github.com/qcountel/anx1ous/releases/latest/download/anx1ous.dll");
 }
 
 // ── Worker thread ─────────────────────────────────────────────────────────────
